@@ -5,9 +5,9 @@ import numpy as np
 import plotly.express as px
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Market Distribution & Probability Tool", layout="wide")
+st.set_page_config(page_title="Custom Market Distribution Tool", layout="wide")
 
-st.title("📊 Market Analysis Dashboard")
+st.title("📊 Market Analysis & Probability Dashboard")
 
 # --- DATA FETCHING FUNCTIONS ---
 @st.cache_data(ttl=3600)
@@ -47,22 +47,34 @@ def get_latest_market_info(symbol):
     width = (abs(tc - bc) / p) * 100
     return float(width), last_date
 
-# --- BINNING LOGIC (0.25% Steps) ---
-def get_custom_dist(series, is_range=False):
-    if is_range:
-        # Range is always positive: 0% to 3% with 0.25% steps
-        bins = [0, 0.0025, 0.005, 0.0075, 0.01, 0.0125, 0.015, 0.0175, 0.02, 0.0225, 0.025, 0.0275, 0.03, np.inf]
-        labels = ['0-0.25%', '0.25-0.5%', '0.5-0.75%', '0.75-1%', '1-1.25%', '1.25-1.5%', 
-                  '1.5-1.75%', '1.75-2%', '2-2.25%', '2.25-2.5%', '2.5-2.75%', '2.75-3%', '>3%']
-    else:
-        # Move can be negative: -2% to 2% with 0.25% steps
-        bins = [-np.inf, -0.02, -0.0175, -0.015, -0.0125, -0.01, -0.0075, -0.005, -0.0025, 0, 
-                0.0025, 0.005, 0.0075, 0.01, 0.0125, 0.015, 0.0175, 0.02, np.inf]
-        labels = ['<-2%', '-2% to -1.75%', '-1.75% to -1.5%', '-1.5% to -1.25%', '-1.25% to -1%', 
-                  '-1% to -0.75%', '-0.75% to -0.5%', '-0.5% to -0.25%', '-0.25% to 0%', 
-                  '0% to 0.25%', '0.25% to 0.5%', '0.5% to 0.75%', '0.75% to 1%', 
-                  '1% to 1.25%', '1.25% to 1.5%', '1.5% to 1.75%', '1.75% to 2%', '>2%']
+# --- DYNAMIC BINNING LOGIC ---
+def get_dynamic_dist(series, b_width, b_lower, b_upper, is_range=False):
+    # Convert percentages to decimals for calculation
+    w = b_width / 100
+    low = b_lower / 100
+    high = b_upper / 100
     
+    if is_range:
+        # Range is always positive, start from 0
+        bins = list(np.arange(0, high + w, w))
+        if bins[-1] < high: bins.append(high)
+        bins.append(np.inf)
+        
+        labels = []
+        for i in range(len(bins)-2):
+            labels.append(f"{bins[i]*100:.2f}% to {bins[i+1]*100:.2f}%")
+        labels.append(f"> {bins[-2]*100:.2f}%")
+    else:
+        # Standard Move (Open to Close)
+        main_bins = list(np.arange(low, high + w, w))
+        bins = [-np.inf] + main_bins + [np.inf]
+        
+        labels = [f"< {main_bins[0]*100:.2f}%"]
+        for i in range(len(main_bins)-1):
+            labels.append(f"{main_bins[i]*100:.2f}% to {main_bins[i+1]*100:.2f}%")
+        labels.append(f"> {main_bins[-1]*100:.2f}%")
+
+    # Cut and count
     d = pd.cut(series, bins=bins, labels=labels).value_counts().sort_index().reset_index()
     d.columns = ['Bin', 'Count']
     d['%'] = (d['Count'] / d['Count'].sum() * 100).round(2)
@@ -85,16 +97,21 @@ if cpr_mode == "Automatic":
     except:
         today_cpr = st.sidebar.number_input("Input CPR Width %", value=0.50, step=0.05)
 else:
-    today_cpr = st.sidebar.number_input("Input Today's CPR Width %", value=0.50, step=0.05, format="%.4f")
+    today_cpr = st.sidebar.number_input("Manual CPR Width %", value=0.50, step=0.05, format="%.4f")
+
+st.sidebar.header("3. Custom Binning Settings")
+user_width = st.sidebar.number_input("Bin Width %", value=0.25, step=0.05, format="%.2f")
+user_lower = st.sidebar.number_input("Lower Bin Limit %", value=-2.0, step=0.25, format="%.2f")
+user_upper = st.sidebar.number_input("Upper Bin Limit %", value=2.0, step=0.25, format="%.2f")
 
 # --- APP LOGIC ---
 try:
     full_data = get_historical_data(ticker, history_years)
     tab1, tab2 = st.tabs(["📈 Historical Distribution", "🔮 Today's Probability"])
 
-    # --- TAB 1: HISTORICAL DISTRIBUTION ---
+    # --- TAB 1: HISTORICAL ---
     with tab1:
-        st.subheader("Historical Analysis & Formulas")
+        st.subheader("Historical Distribution Analysis")
         
         # Formulas
         f_col1, f_col2 = st.columns(2)
@@ -110,23 +127,24 @@ try:
         filtered = full_data[(full_data['CPR_Width_Pct'] > c_threshold_pct) & (full_data['Vix'] <= vix_threshold)]
         st.metric("Matching Days Found", len(filtered))
 
-        dist_col1, dist_col2 = st.columns(2)
-        with dist_col1:
-            st.write("**Open to Close (0.25% Bins)**")
-            oc_df = get_custom_dist(filtered['OpentoClose'])
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write(f"**Open to Close ({user_width}% steps)**")
+            oc_df = get_dynamic_dist(filtered['OpentoClose'], user_width, user_lower, user_upper)
             st.table(oc_df)
             st.plotly_chart(px.bar(oc_df, x='Bin', y='Count', text='%'), use_container_width=True)
 
-        with dist_col2:
-            st.write("**High to Low Range (0.25% Bins)**")
-            hl_df = get_custom_dist(filtered['High_to_low'], is_range=True)
+        with c2:
+            st.write(f"**High to Low Range ({user_width}% steps)**")
+            # Range always starts from 0 for readability
+            hl_df = get_dynamic_dist(filtered['High_to_low'], user_width, 0, user_upper, is_range=True)
             st.table(hl_df)
             st.plotly_chart(px.bar(hl_df, x='Bin', y='Count', text='%', color_discrete_sequence=['orange']), use_container_width=True)
 
-        with st.expander("📄 View Matching Data (Filtered Raw Data)"):
+        with st.expander("📄 View Matching Data Rows"):
             st.dataframe(filtered.sort_index(ascending=False), use_container_width=True)
 
-    # --- TAB 2: TODAY'S PROBABILITY ---
+    # --- TAB 2: PROBABILITY ---
     with tab2:
         st.subheader(f"Predictive Probability (Target CPR: {today_cpr:.4f}%)")
         st.latex(r"P(\text{Event}) = \frac{\text{Historical Matches}}{\text{Total Samples with Similar CPR}}")
@@ -150,17 +168,17 @@ try:
             prob_col1, prob_col2 = st.columns(2)
             with prob_col1:
                 st.write("**Move Probability (O to C)**")
-                p_oc = get_custom_dist(similar_days['OpentoClose'])
+                p_oc = get_dynamic_dist(similar_days['OpentoClose'], user_width, user_lower, user_upper)
                 st.plotly_chart(px.bar(p_oc, x='Bin', y='Count', text='%'), use_container_width=True)
             with prob_col2:
                 st.write("**Range Probability (H to L)**")
-                p_hl = get_custom_dist(similar_days['High_to_low'], is_range=True)
+                p_hl = get_dynamic_dist(similar_days['High_to_low'], user_width, 0, user_upper, is_range=True)
                 st.plotly_chart(px.bar(p_hl, x='Bin', y='Count', text='%', color_discrete_sequence=['orange']), use_container_width=True)
             
             with st.expander("📄 View Similar CPR Days"):
                 st.dataframe(similar_days.sort_index(ascending=False), use_container_width=True)
         else:
-            st.warning("Not enough similar days found in history.")
+            st.warning("Insufficient historical data for this CPR value.")
 
 except Exception as e:
     st.error(f"Error: {e}")
