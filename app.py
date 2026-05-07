@@ -47,6 +47,27 @@ def get_latest_market_info(symbol):
     width = (abs(tc - bc) / p) * 100
     return float(width), last_date
 
+# --- BINNING LOGIC (0.25% Steps) ---
+def get_custom_dist(series, is_range=False):
+    if is_range:
+        # Range is always positive: 0% to 3% with 0.25% steps
+        bins = [0, 0.0025, 0.005, 0.0075, 0.01, 0.0125, 0.015, 0.0175, 0.02, 0.0225, 0.025, 0.0275, 0.03, np.inf]
+        labels = ['0-0.25%', '0.25-0.5%', '0.5-0.75%', '0.75-1%', '1-1.25%', '1.25-1.5%', 
+                  '1.5-1.75%', '1.75-2%', '2-2.25%', '2.25-2.5%', '2.5-2.75%', '2.75-3%', '>3%']
+    else:
+        # Move can be negative: -2% to 2% with 0.25% steps
+        bins = [-np.inf, -0.02, -0.0175, -0.015, -0.0125, -0.01, -0.0075, -0.005, -0.0025, 0, 
+                0.0025, 0.005, 0.0075, 0.01, 0.0125, 0.015, 0.0175, 0.02, np.inf]
+        labels = ['<-2%', '-2% to -1.75%', '-1.75% to -1.5%', '-1.5% to -1.25%', '-1.25% to -1%', 
+                  '-1% to -0.75%', '-0.75% to -0.5%', '-0.5% to -0.25%', '-0.25% to 0%', 
+                  '0% to 0.25%', '0.25% to 0.5%', '0.5% to 0.75%', '0.75% to 1%', 
+                  '1% to 1.25%', '1.25% to 1.5%', '1.5% to 1.75%', '1.75% to 2%', '>2%']
+    
+    d = pd.cut(series, bins=bins, labels=labels).value_counts().sort_index().reset_index()
+    d.columns = ['Bin', 'Count']
+    d['%'] = (d['Count'] / d['Count'].sum() * 100).round(2)
+    return d
+
 # --- SIDEBAR: SETTINGS ---
 st.sidebar.header("1. Data & Filters")
 ticker = st.sidebar.text_input("Stock Ticker", value="^NSEI")
@@ -64,7 +85,7 @@ if cpr_mode == "Automatic":
     except:
         today_cpr = st.sidebar.number_input("Input CPR Width %", value=0.50, step=0.05)
 else:
-    today_cpr = st.sidebar.number_input("Input CPR Width %", value=0.50, step=0.05, format="%.4f")
+    today_cpr = st.sidebar.number_input("Input Today's CPR Width %", value=0.50, step=0.05, format="%.4f")
 
 # --- APP LOGIC ---
 try:
@@ -75,8 +96,7 @@ try:
     with tab1:
         st.subheader("Historical Analysis & Formulas")
         
-        # Formula Section
-        st.markdown("#### Logic & Formulas")
+        # Formulas
         f_col1, f_col2 = st.columns(2)
         with f_col1:
             st.latex(r"Pivot (P) = \frac{High + Low + Close}{3}")
@@ -87,30 +107,19 @@ try:
 
         st.divider()
 
-        # Data Filtering
         filtered = full_data[(full_data['CPR_Width_Pct'] > c_threshold_pct) & (full_data['Vix'] <= vix_threshold)]
         st.metric("Matching Days Found", len(filtered))
 
-        # Distributions
-        bins = [-np.inf, -0.01, -0.005, 0, 0.005, 0.01, np.inf]
-        labels = ['<-1%', '-1% to -0.5%', '-0.5% to 0%', '0% to 0.5%', '0.5% to 1%', '>1%']
-        
-        def get_dist(series):
-            d = pd.cut(series, bins=bins, labels=labels).value_counts().sort_index().reset_index()
-            d.columns = ['Bin', 'Count']
-            d['%'] = (d['Count'] / d['Count'].sum() * 100).round(1)
-            return d
-
         dist_col1, dist_col2 = st.columns(2)
         with dist_col1:
-            st.write("**Open to Close Distribution**")
-            oc_df = get_dist(filtered['OpentoClose'])
+            st.write("**Open to Close (0.25% Bins)**")
+            oc_df = get_custom_dist(filtered['OpentoClose'])
             st.table(oc_df)
             st.plotly_chart(px.bar(oc_df, x='Bin', y='Count', text='%'), use_container_width=True)
 
         with dist_col2:
-            st.write("**High to Low (Range) Distribution**")
-            hl_df = get_dist(filtered['High_to_low'])
+            st.write("**High to Low Range (0.25% Bins)**")
+            hl_df = get_custom_dist(filtered['High_to_low'], is_range=True)
             st.table(hl_df)
             st.plotly_chart(px.bar(hl_df, x='Bin', y='Count', text='%', color_discrete_sequence=['orange']), use_container_width=True)
 
@@ -120,11 +129,9 @@ try:
     # --- TAB 2: TODAY'S PROBABILITY ---
     with tab2:
         st.subheader(f"Predictive Probability (Target CPR: {today_cpr:.4f}%)")
-        
-        st.markdown("#### Probability Formula")
         st.latex(r"P(\text{Event}) = \frac{\text{Historical Matches}}{\text{Total Samples with Similar CPR}}")
         
-        buffer = 0.15 # 15% similarity buffer
+        buffer = 0.15 
         similar_days = full_data[
             (full_data['CPR_Width_Pct'] >= today_cpr * (1 - buffer)) & 
             (full_data['CPR_Width_Pct'] <= today_cpr * (1 + buffer))
@@ -142,11 +149,13 @@ try:
             st.divider()
             prob_col1, prob_col2 = st.columns(2)
             with prob_col1:
-                st.write("**Outcome Probability (O to C)**")
-                st.plotly_chart(px.bar(get_dist(similar_days['OpentoClose']), x='Bin', y='Count', text='%'), use_container_width=True)
+                st.write("**Move Probability (O to C)**")
+                p_oc = get_custom_dist(similar_days['OpentoClose'])
+                st.plotly_chart(px.bar(p_oc, x='Bin', y='Count', text='%'), use_container_width=True)
             with prob_col2:
                 st.write("**Range Probability (H to L)**")
-                st.plotly_chart(px.bar(get_dist(similar_days['High_to_low']), x='Bin', y='Count', text='%', color_discrete_sequence=['orange']), use_container_width=True)
+                p_hl = get_custom_dist(similar_days['High_to_low'], is_range=True)
+                st.plotly_chart(px.bar(p_hl, x='Bin', y='Count', text='%', color_discrete_sequence=['orange']), use_container_width=True)
             
             with st.expander("📄 View Similar CPR Days"):
                 st.dataframe(similar_days.sort_index(ascending=False), use_container_width=True)
