@@ -200,7 +200,6 @@
 #     st.error(f"Error fetching data: {e}")
 
 
-
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -208,34 +207,21 @@ import numpy as np
 import plotly.express as px
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Market Probability Dashboard", layout="wide")
+st.set_page_config(page_title="Market Stats & Probability", layout="wide")
 
-st.title("📊 Market Stats & Probability Analysis")
-
-# --- FORMULA EXPLANATION ---
-with st.expander("ℹ️ View Formulas & Probability Logic"):
-    st.markdown("### 1. CPR Formulas")
-    st.latex(r"Pivot (P) = \frac{High + Low + Close}{3}")
-    st.latex(r"CPR Width (C \%) = \frac{|TC - BC|}{P} \times 100")
-    
-    st.markdown("### 2. Probability Distribution Logic")
-    st.markdown("""
-    The probability is calculated by filtering historical days where the CPR width was within **±10%** of today's value.
-    """)
-    st.latex(r"P(\text{Event} | C_{today}) = \frac{\text{Historical days matching event}}{\text{Total days with similar CPR width}}")
+st.title("📊 Market Analysis Dashboard")
 
 # --- SIDEBAR: INPUTS ---
-st.sidebar.header("1. Historical Context")
+st.sidebar.header("1. Data Settings")
 ticker = st.sidebar.text_input("Stock Ticker", value="^NSEI")
 history_years = st.sidebar.slider("Years of History", 1, 15, 10)
 
-st.sidebar.header("2. Today's CPR Context")
-# User inputs today's calculated CPR width to see probabilities
-today_cpr = st.sidebar.number_input("Today's CPR Width %", value=0.50, step=0.05, format="%.2f")
-c_range_buffer = 0.10 # Look at days within 10% of today's CPR
+st.sidebar.header("2. Filtering Parameters")
+c_threshold_pct = st.sidebar.number_input("Filter: C > (CPR Width %)", value=1.0, step=0.1)
+vix_threshold = st.sidebar.number_input("Filter: Vix <=", value=20.0, step=0.5)
 
-st.sidebar.header("3. Global Filters")
-vix_threshold = st.sidebar.number_input("Vix Max Limit", value=20.0, step=0.5)
+st.sidebar.header("3. Today's Prediction")
+today_cpr = st.sidebar.number_input("Today's Current CPR Width %", value=0.50, step=0.05)
 
 # --- DATA FETCHING ---
 @st.cache_data(ttl=3600)
@@ -249,7 +235,7 @@ def get_data(symbol, years):
     df = data.copy()
     df['Vix'] = vix
     
-    # Calculations
+    # CALCULATIONS
     pivot = (df['High'] + df['Low'] + df['Close']) / 3
     bc = (df['High'] + df['Low']) / 2
     tc = (2 * pivot) - bc
@@ -263,69 +249,79 @@ def get_data(symbol, years):
 try:
     full_data = get_data(ticker, history_years)
     
-    # --- PROBABILITY ANALYSIS FOR TODAY ---
-    # Filter days with similar CPR width (+/- buffer)
-    lower_bound = today_cpr * (1 - c_range_buffer)
-    upper_bound = today_cpr * (1 + c_range_buffer)
-    
-    similar_days = full_data[
-        (full_data['CPR_Width_Pct'] >= lower_bound) & 
-        (full_data['CPR_Width_Pct'] <= upper_bound) &
-        (full_data['Vix'] <= vix_threshold)
-    ]
+    # Create the Tabs
+    tab1, tab2 = st.tabs(["📈 Historical Distribution", "🔮 Today's Probability"])
 
-    st.subheader(f"🔮 Probability Analysis for Today (CPR: {today_cpr}%)")
-    
-    if len(similar_days) > 5:
-        p_col1, p_col2, p_col3, p_col4 = st.columns(4)
+    # --- TAB 1: HISTORICAL ANALYSIS ---
+    with tab1:
+        st.subheader("General Distribution (Filtered by Sidebar)")
+        filtered = full_data[(full_data['CPR_Width_Pct'] > c_threshold_pct) & (full_data['Vix'] <= vix_threshold)]
+        st.metric("Total Days Found", len(filtered))
         
-        # Calculate Probabilities
-        prob_range_1 = (similar_days['High_to_low'] > 0.01).mean() * 100
-        prob_green = (similar_days['OpentoClose'] > 0).mean() * 100
-        avg_range = similar_days['High_to_low'].mean() * 100
-        prob_big_move = (abs(similar_days['OpentoClose']) > 0.01).mean() * 100
+        col1, col2 = st.columns(2)
+        bins = [-np.inf, -0.01, -0.005, 0, 0.005, 0.01, np.inf]
+        labels = ['<-1%', '-1% to -0.5%', '-0.5% to 0%', '0% to 0.5%', '0.5% to 1%', '>1%']
 
-        p_col1.metric("Sample Size", f"{len(similar_days)} days", help="Historical days with similar CPR")
-        p_col2.metric("Prob. Range > 1%", f"{prob_range_1:.1f}%")
-        p_col3.metric("Prob. Green Close", f"{prob_green:.1f}%")
-        p_col4.metric("Avg. Range expected", f"{avg_range:.2f}%")
+        def get_dist(series):
+            d = pd.cut(series, bins=bins, labels=labels).value_counts().sort_index().reset_index()
+            d.columns = ['Bin', 'Count']
+            d['%'] = (d['Count'] / d['Count'].sum() * 100).round(1)
+            return d
+
+        with col1:
+            oc_dist = get_dist(filtered['OpentoClose'])
+            st.write("**Open to Close**")
+            st.table(oc_dist)
+            st.plotly_chart(px.bar(oc_dist, x='Bin', y='Count', text='%'), use_container_width=True)
+
+        with col2:
+            hl_dist = get_dist(filtered['High_to_low'])
+            st.write("**High to Low**")
+            st.table(hl_dist)
+            st.plotly_chart(px.bar(hl_dist, x='Bin', y='Count', text='%', color_discrete_sequence=['orange']), use_container_width=True)
+
+    # --- TAB 2: TODAY'S PROBABILITY ---
+    with tab2:
+        st.subheader(f"Probability Analysis for CPR Width: {today_cpr}%")
         
-        st.write(f"**Insight:** Out of {len(similar_days)} days where CPR was around {today_cpr}%, {prob_range_1:.1f}% of them resulted in a range larger than 1%.")
-    else:
-        st.warning("Not enough historical data for this specific CPR width. Try increasing the 'Years of History'.")
-
-    # --- HISTORICAL DISTRIBUTIONS (CHARTS) ---
-    st.divider()
-    
-    # Standard Binning for Charts
-    bins = [-np.inf, -0.02, -0.01, -0.005, 0, 0.005, 0.01, 0.02, np.inf]
-    labels = ['<-2%', '-2% to -1%', '-1% to -0.5%', '-0.5% to 0%', '0% to 0.5%', '0.5% to 1%', '1% to 2%', '>2%']
-
-    def get_dist(series):
-        d = pd.cut(series, bins=bins, labels=labels).value_counts().sort_index().reset_index()
-        d.columns = ['Bin', 'Frequency']
-        d['%'] = (d['Frequency'] / d['Frequency'].sum() * 100).round(1)
-        return d
-
-    chart_col1, chart_col2 = st.columns(2)
-    
-    with chart_col1:
-        st.markdown("### Open to Close Distribution")
-        oc_data = get_dist(similar_days['OpentoClose'])
-        fig_oc = px.bar(oc_data, x='Bin', y='Frequency', text='%', title="Move Probability")
-        st.plotly_chart(fig_oc, use_container_width=True)
-
-    with chart_col2:
-        st.markdown("### Range (High to Low) Distribution")
-        # Custom bins for Range since range is always positive
-        r_bins = [0, 0.005, 0.01, 0.015, 0.02, 0.03, np.inf]
-        r_labels = ['0-0.5%', '0.5-1%', '1-1.5%', '1.5-2%', '2-3%', '>3%']
-        hl_data = pd.cut(similar_days['High_to_low'], bins=r_bins, labels=r_labels).value_counts().sort_index().reset_index()
-        hl_data.columns = ['Bin', 'Frequency']
-        hl_data['%'] = (hl_data['Frequency'] / hl_data['Frequency'].sum() * 100).round(1)
+        # Formula Display
+        st.info("💡 **Probability Formula:** $P(\text{Event}) = \frac{\text{Historical Days Matching Event}}{\text{Total Days with Similar CPR}}$")
         
-        fig_hl = px.bar(hl_data, x='Bin', y='Frequency', text='%', title="Range Probability", color_discrete_sequence=['orange'])
-        st.plotly_chart(fig_hl, use_container_width=True)
+        # Filter for similar CPR days (+/- 15% range)
+        buffer = 0.15
+        similar_days = full_data[
+            (full_data['CPR_Width_Pct'] >= today_cpr * (1 - buffer)) & 
+            (full_data['CPR_Width_Pct'] <= today_cpr * (1 + buffer))
+        ]
+
+        if len(similar_days) > 0:
+            # Probability Stats
+            p_range_1 = (similar_days['High_to_low'] > 0.01).mean() * 100
+            p_green = (similar_days['OpentoClose'] > 0).mean() * 100
+            
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Historical Sample", f"{len(similar_days)} days")
+            m2.metric("Prob. Range > 1%", f"{p_range_1:.1f}%")
+            m3.metric("Prob. Green Close", f"{p_green:.1f}%")
+
+            st.divider()
+            
+            # Probability Distributions for the new tab
+            p_col1, p_col2 = st.columns(2)
+            
+            with p_col1:
+                st.markdown("#### Move Probability (Open to Close)")
+                p_oc = get_dist(similar_days['OpentoClose'])
+                fig_p_oc = px.bar(p_oc, x='Bin', y='Count', text='%', title="Likely Move Today")
+                st.plotly_chart(fig_p_oc, use_container_width=True)
+
+            with p_col2:
+                st.markdown("#### Range Probability (High to Low)")
+                p_hl = get_dist(similar_days['High_to_low'])
+                fig_p_hl = px.bar(p_hl, x='Bin', y='Count', text='%', title="Likely Range Today", color_discrete_sequence=['orange'])
+                st.plotly_chart(fig_p_hl, use_container_width=True)
+        else:
+            st.error("No historical data found for this CPR width.")
 
 except Exception as e:
-    st.error(f"Error: {e}")
+    st.error(f"Data Error: {e}")
